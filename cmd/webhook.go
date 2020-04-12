@@ -1,22 +1,30 @@
 package main
 
 import (
+	"context"
 	"crypto/sha256"
 	"encoding/json"
 	"fmt"
 	"io/ioutil"
 	"net/http"
-	"strings"
 
 	"github.com/ghodss/yaml"
 	"github.com/golang/glog"
+	"github.com/imdario/mergo"
+	"github.com/mattbaird/jsonpatch"
 	"k8s.io/api/admission/v1beta1"
 	admissionregistrationv1beta1 "k8s.io/api/admissionregistration/v1beta1"
-	corev1 "k8s.io/api/core/v1"
+	v1 "k8s.io/api/apps/v1"
+
+	"k8s.io/apimachinery/pkg/api/errors"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/runtime"
 	"k8s.io/apimachinery/pkg/runtime/serializer"
-	"k8s.io/kubernetes/pkg/apis/core/v1"
+
+	"k8s.io/client-go/kubernetes"
+	"k8s.io/client-go/rest"
+
+	applicationv1alpha1 "github.com/argoproj/argo-cd/pkg/apis/application/v1alpha1"
 )
 
 var (
@@ -34,7 +42,8 @@ var ignoredNamespaces = []string{
 }
 
 const (
-	admissionWebhookAnnotationInjectKey = "sidecar-injector-webhook.morven.me/inject"
+	admissionWebhookAnnotationInjectKey = "argoproj.labs/argocd/config-injector"
+
 	admissionWebhookAnnotationStatusKey = "sidecar-injector-webhook.morven.me/status"
 )
 
@@ -51,33 +60,35 @@ type WhSvrParameters struct {
 	sidecarCfgFile string // path to sidecar injector configuration file
 }
 
-type Config struct {
-	Containers []corev1.Container `yaml:"containers"`
-	Volumes    []corev1.Volume    `yaml:"volumes"`
+type ConfigMapKeySelector struct {
+	// The ConfigMap to select from.
+	Name string `json:"name"`
+	// The key to select.
+	Key string `json:"key,omitempty"`
+	// Specify whether the ConfigMap/Secret must be defined
+	Optional bool `json:"optional,omitempty"`
 }
 
-type patchOperation struct {
-	Op    string      `json:"op"`
-	Path  string      `json:"path"`
-	Value interface{} `json:"value,omitempty"`
+// ValuesFromSource represents a source of values.
+// Only one of its fields may be set.
+type ValuesFromSource struct {
+	// Selects a key of a ConfigMap.
+	ConfigMapKeyRef *ConfigMapKeySelector `json:"configMapKeyRef,omitempty"`
+}
+
+type Config struct {
+}
+
+type ValuesRefs struct {
+	ValuesFrom []ValuesFromSource `json:"valuesFrom`
 }
 
 func init() {
-	_ = corev1.AddToScheme(runtimeScheme)
+	//_ = corev1.AddToScheme(runtimeScheme)
 	_ = admissionregistrationv1beta1.AddToScheme(runtimeScheme)
 	// defaulting with webhooks:
 	// https://github.com/kubernetes/kubernetes/issues/57982
 	_ = v1.AddToScheme(runtimeScheme)
-}
-
-// (https://github.com/kubernetes/kubernetes/issues/57982)
-func applyDefaultsWorkaround(containers []corev1.Container, volumes []corev1.Volume) {
-	defaulter.Default(&corev1.Pod{
-		Spec: corev1.PodSpec{
-			Containers: containers,
-			Volumes:    volumes,
-		},
-	})
 }
 
 func loadConfig(configFile string) (*Config, error) {
@@ -96,119 +107,138 @@ func loadConfig(configFile string) (*Config, error) {
 }
 
 // Check whether the target resoured need to be mutated
-func mutationRequired(ignoredList []string, metadata *metav1.ObjectMeta) bool {
+func mutationRequired(ignoredList []string, application *applicationv1alpha1.Application) bool {
 	// skip special kubernete system namespaces
 	for _, namespace := range ignoredList {
-		if metadata.Namespace == namespace {
-			glog.Infof("Skip mutation for %v for it's in special namespace:%v", metadata.Name, metadata.Namespace)
+		if application.ObjectMeta.Namespace == namespace {
+			glog.Infof("Skip mutation for %v for it's in special namespace:%v", application.ObjectMeta.Name, application.ObjectMeta.Namespace)
 			return false
 		}
 	}
 
-	annotations := metadata.GetAnnotations()
+	if !application.Spec.Source.IsHelm() {
+		glog.Infof("Skip mutation for %v, only Helm is currently supported", application.ObjectMeta.Name, application.ObjectMeta.Namespace)
+		return false
+	}
+
+	annotations := application.ObjectMeta.GetAnnotations()
 	if annotations == nil {
 		annotations = map[string]string{}
 	}
 
-	status := annotations[admissionWebhookAnnotationStatusKey]
+	_, required := annotations[admissionWebhookAnnotationInjectKey]
 
-	// determine whether to perform mutation based on annotation for the target resource
-	var required bool
-	if strings.ToLower(status) == "injected" {
-		required = false
-	} else {
-		switch strings.ToLower(annotations[admissionWebhookAnnotationInjectKey]) {
-		default:
-			required = false
-		case "y", "yes", "true", "on":
-			required = true
-		}
-	}
-
-	glog.Infof("Mutation policy for %v/%v: status: %q required:%v", metadata.Namespace, metadata.Name, status, required)
+	glog.Infof("Mutation policy for %v/%v: required:%v", application.ObjectMeta.Namespace, application.ObjectMeta.Name, required)
 	return required
 }
 
-func addContainer(target, added []corev1.Container, basePath string) (patch []patchOperation) {
-	first := len(target) == 0
-	var value interface{}
-	for _, add := range added {
-		value = add
-		path := basePath
-		if first {
-			first = false
-			value = []corev1.Container{add}
-		} else {
-			path = path + "/-"
-		}
-		patch = append(patch, patchOperation{
-			Op:    "add",
-			Path:  path,
-			Value: value,
-		})
-	}
-	return patch
-}
-
-func addVolume(target, added []corev1.Volume, basePath string) (patch []patchOperation) {
-	first := len(target) == 0
-	var value interface{}
-	for _, add := range added {
-		value = add
-		path := basePath
-		if first {
-			first = false
-			value = []corev1.Volume{add}
-		} else {
-			path = path + "/-"
-		}
-		patch = append(patch, patchOperation{
-			Op:    "add",
-			Path:  path,
-			Value: value,
-		})
-	}
-	return patch
-}
-
-func updateAnnotation(target map[string]string, added map[string]string) (patch []patchOperation) {
-	for key, value := range added {
-		if target == nil || target[key] == "" {
-			target = map[string]string{}
-			patch = append(patch, patchOperation{
-				Op:   "add",
-				Path: "/metadata/annotations",
-				Value: map[string]string{
-					key: value,
-				},
-			})
-		} else {
-			patch = append(patch, patchOperation{
-				Op:    "replace",
-				Path:  "/metadata/annotations/" + key,
-				Value: value,
-			})
-		}
-	}
-	return patch
-}
-
 // create mutation patch for resoures
-func createPatch(pod *corev1.Pod, sidecarConfig *Config, annotations map[string]string) ([]byte, error) {
-	var patch []patchOperation
+func createPatch(application *applicationv1alpha1.Application) ([]jsonpatch.JsonPatchOperation, error) {
+	modifiedApplication := application.DeepCopy()
 
-	patch = append(patch, addContainer(pod.Spec.Containers, sidecarConfig.Containers, "/spec/containers")...)
-	patch = append(patch, addVolume(pod.Spec.Volumes, sidecarConfig.Volumes, "/spec/volumes")...)
-	patch = append(patch, updateAnnotation(pod.Annotations, annotations)...)
+	annotations := application.ObjectMeta.GetAnnotations()
+	injectAnnotation := annotations[admissionWebhookAnnotationInjectKey]
 
-	return json.Marshal(patch)
+	var valueRefs ValuesRefs
+
+	if err := json.Unmarshal([]byte(injectAnnotation), &valueRefs); err != nil {
+		return nil, err
+	}
+
+	// FIXME:  Don't make these here since it's wasteful, init this in main.go and inject it into the webhook server
+	config, err := rest.InClusterConfig()
+	if err != nil {
+		return nil, err
+	}
+	// creates the clientset
+	clientset, err := kubernetes.NewForConfig(config)
+
+	if err != nil {
+		return nil, err
+	}
+
+	var targetValues map[string]interface{}
+
+	if application.Spec.Source.Helm.Values != "" {
+		if err := yaml.Unmarshal([]byte(application.Spec.Source.Helm.Values), &targetValues); err != nil {
+			return nil, err
+		}
+	}
+
+	for _, ref := range valueRefs.ValuesFrom {
+		// Right now we only support ConfigMaps, however the nil check allows support for Secrets to be added in the future
+		if ref.ConfigMapKeyRef == nil {
+			continue
+		}
+
+		cm, err := clientset.CoreV1().ConfigMaps("default").Get(context.TODO(), ref.ConfigMapKeyRef.Name, metav1.GetOptions{})
+
+		if err != nil {
+			if errors.IsNotFound(err) {
+				if ref.ConfigMapKeyRef.Optional {
+					continue
+				}
+
+				return nil, fmt.Errorf("missing required configmap %s", ref.ConfigMapKeyRef.Name)
+			}
+		}
+
+		configmapKey := ref.ConfigMapKeyRef.Key
+
+		if configmapKey == "" {
+			configmapKey = "values.yaml"
+		}
+
+		valuesSource, ok := cm.Data[configmapKey]
+
+		if !ok {
+			if ref.ConfigMapKeyRef.Optional {
+				continue
+			}
+
+			return nil, fmt.Errorf("missing required key (%s) in configmap %s", configmapKey, ref.ConfigMapKeyRef.Name)
+		}
+
+		var values map[string]interface{}
+
+		if err := yaml.Unmarshal([]byte(valuesSource), &values); err != nil {
+			return nil, err
+		}
+
+		if err := mergo.Merge(&targetValues, &values, mergo.WithOverride); err != nil {
+			return nil, err
+		}
+	}
+
+	targetValuesBytes, err := yaml.Marshal(targetValues)
+
+	if err != nil {
+		return nil, err
+	}
+
+	modifiedApplication.Spec.Source.Helm.Values = string(targetValuesBytes)
+
+	sourceApplicationBytes, err := json.Marshal(&application)
+
+	if err != nil {
+		return nil, err
+	}
+
+	targetApplicationBytes, err := json.Marshal(&modifiedApplication)
+
+	if err != nil {
+		return nil, err
+	}
+
+	return jsonpatch.CreatePatch(sourceApplicationBytes, targetApplicationBytes)
 }
 
 // main mutation process
 func (whsvr *WebhookServer) mutate(ar *v1beta1.AdmissionReview) *v1beta1.AdmissionResponse {
 	req := ar.Request
-	var pod corev1.Pod
-	if err := json.Unmarshal(req.Object.Raw, &pod); err != nil {
+	var application applicationv1alpha1.Application
+
+	if err := json.Unmarshal(req.Object.Raw, &application); err != nil {
 		glog.Errorf("Could not unmarshal raw object: %v", err)
 		return &v1beta1.AdmissionResponse{
 			Result: &metav1.Status{
@@ -218,20 +248,35 @@ func (whsvr *WebhookServer) mutate(ar *v1beta1.AdmissionReview) *v1beta1.Admissi
 	}
 
 	glog.Infof("AdmissionReview for Kind=%v, Namespace=%v Name=%v (%v) UID=%v patchOperation=%v UserInfo=%v",
-		req.Kind, req.Namespace, req.Name, pod.Name, req.UID, req.Operation, req.UserInfo)
+		req.Kind, req.Namespace, req.Name, application.ObjectMeta.Name, req.UID, req.Operation, req.UserInfo)
 
 	// determine whether to perform mutation
-	if !mutationRequired(ignoredNamespaces, &pod.ObjectMeta) {
-		glog.Infof("Skipping mutation for %s/%s due to policy check", pod.Namespace, pod.Name)
+	if !mutationRequired(ignoredNamespaces, &application) {
+		glog.Infof("Skipping mutation for %s/%s due to policy check", application.ObjectMeta.Namespace, application.ObjectMeta.Name)
 		return &v1beta1.AdmissionResponse{
 			Allowed: true,
 		}
 	}
 
-	// Workaround: https://github.com/kubernetes/kubernetes/issues/57982
-	applyDefaultsWorkaround(whsvr.sidecarConfig.Containers, whsvr.sidecarConfig.Volumes)
-	annotations := map[string]string{admissionWebhookAnnotationStatusKey: "injected"}
-	patchBytes, err := createPatch(&pod, whsvr.sidecarConfig, annotations)
+	patches, err := createPatch(&application)
+
+	if err != nil {
+		return &v1beta1.AdmissionResponse{
+			Result: &metav1.Status{
+				Message: err.Error(),
+			},
+		}
+	}
+
+	if len(patches) == 0 {
+		glog.Infof("No patches required for %s/%s", application.ObjectMeta.Namespace, application.ObjectMeta.Name)
+		return &v1beta1.AdmissionResponse{
+			Allowed: true,
+		}
+	}
+
+	patchBytes, err := json.Marshal(&patches)
+
 	if err != nil {
 		return &v1beta1.AdmissionResponse{
 			Result: &metav1.Status{

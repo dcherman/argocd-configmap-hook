@@ -1,36 +1,25 @@
-module github.com/morvencao/kube-mutating-webhook-tutorial
+module github.com/dcherman/argocd-configmap-hook
 
-go 1.13
+go 1.14
 
 require (
-	github.com/PuerkitoBio/purell v1.1.0 // indirect
-	github.com/PuerkitoBio/urlesc v0.0.0-20170810143723-de5bf2ad4578 // indirect
-	github.com/davecgh/go-spew v1.1.1 // indirect
-	github.com/docker/distribution v2.6.0-rc.1.0.20180313231215-34c706e75924+incompatible // indirect
-	github.com/emicklei/go-restful v2.6.0+incompatible // indirect
+	github.com/Masterminds/semver v1.5.0 // indirect
+	github.com/argoproj/argo-cd v1.5.1
+	github.com/argoproj/pkg v0.0.0-20200319004004-f46beff7cd54 // indirect
 	github.com/ghodss/yaml v1.0.0
-	github.com/go-openapi/jsonpointer v0.0.0-20170102174223-779f45308c19 // indirect
-	github.com/go-openapi/jsonreference v0.0.0-20161105162150-36d33bfe519e // indirect
-	github.com/go-openapi/spec v0.0.0-20180302193043-d8000b5bfbd1 // indirect
-	github.com/go-openapi/swag v0.0.0-20180302192843-ceb469cb0fdf // indirect
-	github.com/gogo/protobuf v1.0.0 // indirect
 	github.com/golang/glog v0.0.0-20160126235308-23def4e6c14b
-	github.com/golang/protobuf v1.3.5 // indirect
-	github.com/google/gofuzz v0.0.0-20170612174753-24818f796faf // indirect
-	github.com/json-iterator/go v0.0.0-20180228091157-3353055b2a1a // indirect
-	github.com/mailru/easyjson v0.0.0-20180311161919-f594efddfa17 // indirect
-	github.com/modern-go/concurrent v0.0.0-20180306012644-bacd9c7ef1dd // indirect
-	github.com/modern-go/reflect2 v0.0.0-20180228065516-1df9eeb2bb81 // indirect
-	github.com/opencontainers/go-digest v1.0.0-rc1 // indirect
-	github.com/spf13/pflag v1.0.0 // indirect
-	github.com/stretchr/testify v1.5.1 // indirect
-	golang.org/x/net v0.0.0-20180313215339-892bf7b0c6e2 // indirect
-	golang.org/x/text v0.3.0 // indirect
-	gopkg.in/inf.v0 v0.9.0 // indirect
-	k8s.io/api v0.0.0-20180127130940-acf347b865f2
-	k8s.io/apiextensions-apiserver v0.0.0-20180314073733-9f7d28e4a66f // indirect
-	k8s.io/apimachinery v0.0.0-20180126010752-19e3f5aa3adc
-	k8s.io/apiserver v0.0.0-20180313225939-8e2fdf029740 // indirect
-	k8s.io/kube-openapi v0.0.0-20180216212618-50ae88d24ede // indirect
-	k8s.io/kubernetes v1.9.4
+	github.com/imdario/mergo v0.3.9
+	github.com/kballard/go-shellquote v0.0.0-20180428030007-95032a82bc51 // indirect
+	github.com/mattbaird/jsonpatch v0.0.0-20171005235357-81af80346b1a
+	github.com/robfig/cron v1.2.0 // indirect
+	github.com/sirupsen/logrus v1.5.0 // indirect
+	golang.org/x/time v0.0.0-20191024005414-555d28b269f0 // indirect
+	google.golang.org/grpc v1.28.1 // indirect
+	gopkg.in/src-d/go-git.v4 v4.13.1 // indirect
+	k8s.io/api v0.18.1
+	k8s.io/apimachinery v0.18.1
+	k8s.io/client-go v11.0.0+incompatible
+	k8s.io/utils v0.0.0-20200411171748-3d5a2fe318e4 // indirect
 )
+
+replace k8s.io/client-go => k8s.io/client-go v0.18.1
